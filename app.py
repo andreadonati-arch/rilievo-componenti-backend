@@ -1,4 +1,7 @@
 from flask import Flask, request, jsonify
+import requests
+import tempfile
+import os
 
 app = Flask(__name__)
 
@@ -15,12 +18,45 @@ def rilievo():
         print("Nuovo rilievo ricevuto")
         print(data)
 
+        foto_url = data.get("foto")
+
+        if not foto_url:
+            return jsonify({
+                "status": "errore",
+                "message": "URL foto mancante"
+            }), 400
+
+        response = requests.get(foto_url)
+
+        if response.status_code != 200:
+            return jsonify({
+                "status": "errore",
+                "message": "Impossibile scaricare immagine"
+            }), 500
+
+        temp_file = tempfile.NamedTemporaryFile(delete=False, suffix=".jpg")
+
+        temp_file.write(response.content)
+        temp_file.close()
+
+        print("Immagine salvata in:")
+        print(temp_file.name)
+
+        file_size = os.path.getsize(temp_file.name)
+
+        print("Dimensione file:")
+        print(file_size)
+
         return jsonify({
             "status": "ok",
-            "message": "Rilievo ricevuto correttamente"
+            "message": "Immagine scaricata correttamente",
+            "file_temporaneo": temp_file.name,
+            "dimensione_file": file_size
         })
 
     except Exception as error:
+
+        print(error)
 
         return jsonify({
             "status": "errore",
