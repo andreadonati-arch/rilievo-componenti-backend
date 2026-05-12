@@ -23,7 +23,17 @@ def parse_numero_italiano(valore):
     except ValueError:
         return None
 
-def analizza_immagine(percorso_file, quota_nota_mm):
+def diametro_contorno(contorno):
+    (x, y), raggio = cv2.minEnclosingCircle(contorno)
+    return {
+        "centro_x_pixel": float(x),
+        "centro_y_pixel": float(y),
+        "raggio_pixel": float(raggio),
+        "diametro_pixel": float(raggio * 2),
+        "area_pixel": float(cv2.contourArea(contorno))
+    }
+
+def analizza_immagine(percorso_file, quota_nota_mm, tipo_quota_nota, tipo_componente):
     immagine = cv2.imread(percorso_file)
 
     if immagine is None:
@@ -34,39 +44,97 @@ def analizza_immagine(percorso_file, quota_nota_mm):
 
     bordi = cv2.Canny(sfocata, 50, 150)
 
-    contorni, _ = cv2.findContours(
+    contorni, gerarchia = cv2.findContours(
         bordi,
-        cv2.RETR_EXTERNAL,
+        cv2.RETR_TREE,
         cv2.CHAIN_APPROX_SIMPLE
     )
 
     if not contorni:
         raise ValueError("Nessun contorno rilevato")
 
-    contorno_principale = max(contorni, key=cv2.contourArea)
-    area = cv2.contourArea(contorno_principale)
+    contorni_validi = []
+    for idx, contorno in enumerate(contorni):
+        area = cv2.contourArea(contorno)
+        if area >= 100:
+            contorni_validi.append((idx, contorno, area))
 
-    if area < 100:
-        raise ValueError("Contorno troppo piccolo o immagine non valida")
+    if not contorni_validi:
+        raise ValueError("Nessun contorno valido rilevato")
 
-    (x, y), raggio = cv2.minEnclosingCircle(contorno_principale)
+    contorni_validi.sort(key=lambda item: item[2], reverse=True)
 
-    diametro_pixel = raggio * 2
+    contorno_esterno = contorni_validi[0][1]
+    esterno = diametro_contorno(contorno_esterno)
 
-    if diametro_pixel <= 0:
-        raise ValueError("Diametro in pixel non valido")
+    diametro_esterno_pixel = esterno["diametro_pixel"]
 
-    scala_mm_per_pixel = quota_nota_mm / diametro_pixel
+    if diametro_esterno_pixel <= 0:
+        raise ValueError("Diametro esterno in pixel non valido")
 
-    return {
-        "diametro_pixel": round(diametro_pixel, 2),
-        "raggio_pixel": round(raggio, 2),
-        "centro_x_pixel": round(x, 2),
-        "centro_y_pixel": round(y, 2),
-        "area_contorno_pixel": round(area, 2),
+    tipo_quota = str(tipo_quota_nota or "").strip().lower()
+
+    if tipo_quota == "diametro esterno":
+        scala_mm_per_pixel = quota_nota_mm / diametro_esterno_pixel
+    else:
+        scala_mm_per_pixel = quota_nota_mm / diametro_esterno_pixel
+
+    diametro_interno_pixel = None
+    diametro_interno_stimato_mm = None
+
+    if str(tipo_componente or "").strip().lower() in ["anello", "tubo", "flangia"]:
+        candidati_interni = []
+
+        centro_esterno = np.array([
+            esterno["centro_x_pixel"],
+            esterno["centro_y_pixel"]
+        ])
+
+        for idx, contorno, area in contorni_validi[1:]:
+            info = diametro_contorno(contorno)
+            diametro = info["diametro_pixel"]
+
+            if diametro <= 0:
+                continue
+
+            if diametro >= diametro_esterno_pixel * 0.95:
+                continue
+
+            if diametro <= diametro_esterno_pixel * 0.10:
+                continue
+
+            centro = np.array([
+                info["centro_x_pixel"],
+                info["centro_y_pixel"]
+            ])
+
+            distanza_centri = np.linalg.norm(centro - centro_esterno)
+
+            if distanza_centri > diametro_esterno_pixel * 0.25:
+                continue
+
+            candidati_interni.append((area, info))
+
+        if candidati_interni:
+            candidati_interni.sort(key=lambda item: item[0], reverse=True)
+            interno = candidati_interni[0][1]
+            diametro_interno_pixel = interno["diametro_pixel"]
+            diametro_interno_stimato_mm = diametro_interno_pixel * scala_mm_per_pixel
+
+    risultato = {
+        "diametro_esterno_pixel": round(diametro_esterno_pixel, 2),
+        "raggio_esterno_pixel": round(esterno["raggio_pixel"], 2),
+        "centro_esterno_x_pixel": round(esterno["centro_x_pixel"], 2),
+        "centro_esterno_y_pixel": round(esterno["centro_y_pixel"], 2),
+        "area_contorno_esterno_pixel": round(esterno["area_pixel"], 2),
         "scala_mm_per_pixel": round(scala_mm_per_pixel, 6),
-        "diametro_stimato_mm": round(diametro_pixel * scala_mm_per_pixel, 2)
+        "diametro_stimato_mm": round(diametro_esterno_pixel * scala_mm_per_pixel, 2),
+        "diametro_interno_pixel": round(diametro_interno_pixel, 2) if diametro_interno_pixel else None,
+        "diametro_interno_stimato_mm": round(diametro_interno_stimato_mm, 2) if diametro_interno_stimato_mm else None,
+        "numero_contorni_validi": len(contorni_validi)
     }
+
+    return risultato
 
 @app.route('/rilievo', methods=['POST'])
 def rilievo():
@@ -81,6 +149,8 @@ def rilievo():
 
         foto_url = data.get("foto")
         quota_nota_mm = parse_numero_italiano(data.get("quota_nota_mm"))
+        tipo_quota_nota = data.get("tipo_quota_nota")
+        tipo_componente = data.get("tipo_componente")
 
         if not foto_url:
             return jsonify({
@@ -116,7 +186,12 @@ def rilievo():
         print("Dimensione file:")
         print(file_size)
 
-        risultato = analizza_immagine(temp_file_path, quota_nota_mm)
+        risultato = analizza_immagine(
+            temp_file_path,
+            quota_nota_mm,
+            tipo_quota_nota,
+            tipo_componente
+        )
 
         print("Risultato analisi OpenCV:")
         print(risultato)
