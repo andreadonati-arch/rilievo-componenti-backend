@@ -42,7 +42,10 @@ def analizza_immagine(percorso_file, quota_nota_mm, tipo_quota_nota, tipo_compon
     grigio = cv2.cvtColor(immagine, cv2.COLOR_BGR2GRAY)
     sfocata = cv2.GaussianBlur(grigio, (7, 7), 0)
 
-    bordi = cv2.Canny(sfocata, 50, 150)
+    bordi = cv2.Canny(sfocata, 35, 120)
+
+    kernel = np.ones((3, 3), np.uint8)
+    bordi = cv2.dilate(bordi, kernel, iterations=1)
 
     contorni, gerarchia = cv2.findContours(
         bordi,
@@ -56,7 +59,7 @@ def analizza_immagine(percorso_file, quota_nota_mm, tipo_quota_nota, tipo_compon
     contorni_validi = []
     for idx, contorno in enumerate(contorni):
         area = cv2.contourArea(contorno)
-        if area >= 100:
+        if area >= 40:
             contorni_validi.append((idx, contorno, area))
 
     if not contorni_validi:
@@ -72,15 +75,11 @@ def analizza_immagine(percorso_file, quota_nota_mm, tipo_quota_nota, tipo_compon
     if diametro_esterno_pixel <= 0:
         raise ValueError("Diametro esterno in pixel non valido")
 
-    tipo_quota = str(tipo_quota_nota or "").strip().lower()
-
-    if tipo_quota == "diametro esterno":
-        scala_mm_per_pixel = quota_nota_mm / diametro_esterno_pixel
-    else:
-        scala_mm_per_pixel = quota_nota_mm / diametro_esterno_pixel
+    scala_mm_per_pixel = quota_nota_mm / diametro_esterno_pixel
 
     diametro_interno_pixel = None
     diametro_interno_stimato_mm = None
+    candidati_debug = []
 
     if str(tipo_componente or "").strip().lower() in ["anello", "tubo", "flangia"]:
         candidati_interni = []
@@ -97,20 +96,30 @@ def analizza_immagine(percorso_file, quota_nota_mm, tipo_quota_nota, tipo_compon
             if diametro <= 0:
                 continue
 
-            if diametro >= diametro_esterno_pixel * 0.95:
-                continue
-
-            if diametro <= diametro_esterno_pixel * 0.10:
-                continue
-
             centro = np.array([
                 info["centro_x_pixel"],
                 info["centro_y_pixel"]
             ])
 
             distanza_centri = np.linalg.norm(centro - centro_esterno)
+            rapporto_diametro = diametro / diametro_esterno_pixel
+            rapporto_area = area / esterno["area_pixel"] if esterno["area_pixel"] else 0
 
-            if distanza_centri > diametro_esterno_pixel * 0.25:
+            candidati_debug.append({
+                "diametro_pixel": round(diametro, 2),
+                "area_pixel": round(area, 2),
+                "rapporto_diametro": round(rapporto_diametro, 3),
+                "rapporto_area": round(rapporto_area, 3),
+                "distanza_centri": round(float(distanza_centri), 2)
+            })
+
+            if rapporto_diametro >= 0.98:
+                continue
+
+            if rapporto_diametro <= 0.05:
+                continue
+
+            if distanza_centri > diametro_esterno_pixel * 0.60:
                 continue
 
             candidati_interni.append((area, info))
@@ -131,7 +140,8 @@ def analizza_immagine(percorso_file, quota_nota_mm, tipo_quota_nota, tipo_compon
         "diametro_stimato_mm": round(diametro_esterno_pixel * scala_mm_per_pixel, 2),
         "diametro_interno_pixel": round(diametro_interno_pixel, 2) if diametro_interno_pixel else None,
         "diametro_interno_stimato_mm": round(diametro_interno_stimato_mm, 2) if diametro_interno_stimato_mm else None,
-        "numero_contorni_validi": len(contorni_validi)
+        "numero_contorni_validi": len(contorni_validi),
+        "candidati_interni_debug": candidati_debug[:10]
     }
 
     return risultato
